@@ -113,12 +113,18 @@ class DEEPSTORMv2:
             pass
 
         # Get the CUDA device and save the data loader to be easily reference later
-        self.device = torch.device(f'cuda:{rank % size}')
+        # self.device = torch.device(f'cuda:{rank % size}')
+
+        # CPU
+        self.device = torch.device(f'cpu:{rank % size}')
         self.data_loader = training_data
 
         # Initialize the models
         # We either have the MLP or we have LENET
-        if args.data in ['a9a', 'miniboone']:
+        if args.data == 'a9a':
+            self.model = MLP(self.data_loader.dataset.data.shape[1], 64, 2).to(self.device)
+
+        elif args.data == 'covtype':
             self.model = MLP(self.data_loader.dataset.data.shape[1], 64, 2).to(self.device)
 
         elif args.data == 'mnist':
@@ -216,6 +222,30 @@ class DEEPSTORMv2:
         self.testing_accuracy_local.append(test_acc_local)
         ##################################################
 
+        if rank == 0:
+        # First iteration, print headings, then print the values
+            print("{:<10} | {:<7} | {:<13} | {:<15} | {:<15} | {:<15} | {:<15} | {:<12} | {:<6}".format("Iteration", "Epoch",
+                                                                                      "Stationarity",
+                                                                                      "Train (L / A)",
+                                                                                      "Test (L / A)",
+                                                                                      "Train (L / A) L",
+                                                                                      "Test (L / A) L",
+                                                                                      "Avg Density",
+                                                                                      "Time"))
+            print("{:<10} | {:<7} | {:<13} | {:<15} | {:<15} | {:<15} | {:<15} | {:<12} | {:<6}".format(0,
+                            round(0, 2),
+                            round(self.total_optimality[0], 4),
+                            f"{round(self.training_loss[0], 4)} / {round(self.training_accuracy[0], 2)}",
+                            f"{round(self.testing_loss[0], 4)} / {round(self.testing_accuracy[0], 2)}",
+                            f"{round(self.training_loss[0], 4)} / {round(self.training_accuracy[0], 2)}",
+                            f"{round(self.testing_loss[0], 4)} / {round(self.testing_accuracy_local[0], 2)}",
+                                                         round(self.avg_nnz[0], 6),
+                                                         0.0))
+
+        if self.step_type == 'constant':
+            self.alpha = self.alpha / numpy.power(outer_iterations, 1/3)
+            self.beta = self.beta * self.alpha ** 2 / self.num_nodes
+
         # Time the entire algorithm
         t0 = time.time()
 
@@ -224,7 +254,6 @@ class DEEPSTORMv2:
 
         # Loop over algorithm updates
         for i in range(outer_iterations):
-
             ##################################################
             # Set step-sizes
             if self.step_type == 'constant':
@@ -253,7 +282,7 @@ class DEEPSTORMv2:
 
             # Update the gradients/ d_i
             self.get_grads(self.weights, self.prev_weights)
-
+            
             # Update the gradient tracker
             self.Y = [self.Y[k] + self.D[k].detach().clone() - self.prev_D[k].detach().clone() for k in
                       range(self.num_params)]
@@ -279,13 +308,14 @@ class DEEPSTORMv2:
             # Save times
             comp_time = round(time_i_end - int_time2 + int_time_end - time_i, 4)
             comm_time = comm_time_2 + comm_time1
+
             ##################################################
 
             # Barrier at the end of update for extreme safety
             comm.Barrier()
 
             # Save values at report interval
-            if i % self.report == 0:
+            if i % self.report == 0 and i > 0:
 
                 # Save the first errors using the average value - so all agents are compared fairly
                 avg_weights = self.get_average_param(self.weights)
@@ -321,27 +351,18 @@ class DEEPSTORMv2:
 
                 # Print relevant information
                 if rank == 0:
-                    # First iteration, print headings, then print the values
-                    if i == 0:
-                        print("{:<10} | {:<7} | {:<13} | {:<15} | {:<15} | {:<15} | {:<15} | {:<12} | {:<6}".format("Iteration", "Epoch",
-                                                                                                  "Stationarity",
-                                                                                                  "Train (L / A)",
-                                                                                                  "Test (L / A)",
-                                                                                                  "Train (L / A) L",
-                                                                                                  "Test (L / A) L",
-                                                                                                  "Avg Density",
-                                                                                                  "Time"))
                     print("{:<10} | {:<7} | {:<13} | {:<15} | {:<15} | {:<15} | {:<15} | {:<12} | {:<6}".format(i,
-                                                                     round((i * self.mini_batch) / (self.data_loader.dataset.data.shape[0] // size), 2),
-                                                                     round(total, 4),
-                                                                     f"{round(train_loss, 4)} / {round(train_acc, 2)}",
-                                                                     f"{round(test_loss, 4)} / {round(test_acc, 2)}",
-                                                                     f"{round(train_loss_local, 4)} / {round(train_acc_local, 2)}",
-                                                                     f"{round(test_loss_local, 4)} / {round(test_acc_local, 2)}",
-                                                                     round(avg_nnz, 6),
-                                                                     round(time.time() - t0, 1)))
+                                        round((i * self.mini_batch) / (self.data_loader.dataset.data.shape[0] // size), 2),
+                                        round(total, 4),
+                                        f"{round(train_loss, 4)} / {round(train_acc, 2)}",
+                                        f"{round(test_loss, 4)} / {round(test_acc, 2)}",
+                                        f"{round(train_loss_local, 4)} / {round(train_acc_local, 2)}",
+                                        f"{round(test_loss_local, 4)} / {round(test_acc_local, 2)}",
+                                        round(avg_nnz, 6),
+                                        round(time.time() - t0, 1)))
 
             # Append timing information for each iteration
+            sys.stdout.flush()
             self.compute_time.append(comp_time)
             self.communication_time.append(comm_time)
             self.total_time.append(comp_time + comm_time)
@@ -461,11 +482,49 @@ class DEEPSTORMv2:
         # Set model to training mode
         self.model.train()
 
+        # total_time = time.time()
+        # # Choose one random sample
+        # batch_idx = 0
+        # (data, target) = self.data_loader.dataset[0:self.mini_batch]
+        # total_time = time.time() - total_time
+        # # Print errors
+        # torch.autograd.set_detect_anomaly(True)
+
+        # # Convert data to CUDA if possible
+        # data, target = data.to(self.device).float(), target.to(self.device).long()
+
+        # # Use previous weights to perform the update
+        # self.replace_weights.step(previous_weights, self.device)
+        # self.replace_weights.zero_grad()
+
+        # out2 = self.model(data)
+        # loss2 = (1 / self.num_nodes) * self.training_loss_function(out2, target)
+        # loss2.backward()
+
+        # # Update D
+        # self.D = [(1 - self.beta) * (self.D[ind] - p.grad.data.detach().clone()) for ind, p in
+        #           enumerate(self.model.parameters())]
+
+        # # Zero out gradients
+        # self.replace_weights.step(current_weights, self.device)
+        # self.replace_weights.zero_grad()
+        # # Forward pass of the model
+        # out1 = self.model(data)
+        # loss1 = (1 / self.num_nodes) * self.training_loss_function(out1, target)
+        # # Compute the gradients
+        # loss1.backward()
+
+        # # Update D
+        # self.D = [p.grad.data.detach().clone() + self.D[ind] for ind, p in enumerate(self.model.parameters())]
+
+
+        # total_time = time.time()
         # Choose one random sample
         for batch_idx, (data, target) in enumerate(self.data_loader):
-
+            # total_time = time.time() - total_time
             # Print errors
-            torch.autograd.set_detect_anomaly(True)
+            # torch.autograd.set_detect_anomaly(True)
+            # total_time = time.time() - total_time
 
             # Convert data to CUDA if possible
             data, target = data.to(self.device).float(), target.to(self.device).long()
@@ -473,6 +532,7 @@ class DEEPSTORMv2:
             # Use previous weights to perform the update
             self.replace_weights.step(previous_weights, self.device)
             self.replace_weights.zero_grad()
+
             out2 = self.model(data)
             loss2 = (1 / self.num_nodes) * self.training_loss_function(out2, target)
             loss2.backward()
@@ -494,7 +554,9 @@ class DEEPSTORMv2:
             self.D = [p.grad.data.detach().clone() + self.D[ind] for ind, p in enumerate(self.model.parameters())]
             break
 
+        # total_time = time.time() - total_time
         return None
+        # return total_time
 
     def get_init_grad(self, current_weights, loader):
         '''Get a local gradient'''
@@ -512,7 +574,7 @@ class DEEPSTORMv2:
 
         # Choose one random sample
         for batch_idx, (data, target) in enumerate(loader):
-
+            
             if batch_idx >= self.init_batch:
                 break
 
@@ -689,17 +751,15 @@ if __name__=='__main__':
     # Parse user input
     parser = argparse.ArgumentParser(description='Testing proposed method (v2) on problems from paper.')
 
-    parser.add_argument('--updates', type=int, default=5000, help='Total number of communication rounds.')
-    parser.add_argument('--lr', type=float, default=1.0, help='Local learning rate.')
-    parser.add_argument('--beta', type=float, default=1.0, help='Beta numerator coefficient.')
-    parser.add_argument('--k0', type=int, default=5, help='Step-size term.')
-    parser.add_argument('--l1', type=float, default=0.0, help='L-1 Regularizer.')
-    parser.add_argument('--mini_batch', type=int, default=64, help='Mini-batch size.')
+    parser.add_argument('--updates', type=int, default=10001, help='Total number of communication rounds.')
+    parser.add_argument('--lr', type=float, default=10.0, help='Local learning rate.')
+    parser.add_argument('--beta', type=float, default=0.031, help='Beta numerator coefficient.')
+    parser.add_argument('--k0', type=int, default=3, help='Step-size term.')
+    parser.add_argument('--l1', type=float, default=1e-4, help='L-1 Regularizer.')
+    parser.add_argument('--mini_batch', type=int, default=32, help='Mini-batch size.')
     parser.add_argument('--init_batch', type=int, default=1, help='Initial batch size.')
-    parser.add_argument('--comm_pattern', type=str, default='ring', choices=['ring', 'random', 'complete', 'ladder'],
-                        help='Communication pattern.')
-    parser.add_argument('--data', type=str, default='a9a', choices=['a9a', 'mnist', 'miniboone'],
-                        help='Dataset.')
+    parser.add_argument('--comm_pattern', type=str, default='ring', choices=['ring', 'random', 'ladder'], help='Communication pattern.')
+    parser.add_argument('--data', type=str, default='a9a', choices=['a9a', 'mnist'], help='Dataset.')
     parser.add_argument('--trial', type=int, default=1, help='Which starting variables to use.')
     parser.add_argument('--step_type', type=str, default='diminishing', choices=('constant', 'diminishing'),
                         help='Diminishing or constant step-size.')
@@ -731,32 +791,6 @@ if __name__=='__main__':
             BinaryDataset('data', args.data, train=False),
             batch_size=num_test, sampler=torch.utils.data.SubsetRandomSampler(
             [i for i in range(int(rank * num_test), int((rank + 1) * num_test))]))
-    ###########################
-
-    ###########################
-    # miniboone data
-    elif args.data == 'miniboone':
-        # Subset data to local agent
-        num_samples = 100000 // size
-        train_loader = torch.utils.data.DataLoader(
-            BinaryDataset('data', args.data, train=True),
-            batch_size=args.mini_batch, sampler=torch.utils.data.SubsetRandomSampler(
-                [i for i in range(int(rank * num_samples), int((rank + 1) * num_samples))]))
-
-        # Load data to be used to compute full gradient with neighbors
-        optimality_loader = torch.utils.data.DataLoader(
-            BinaryDataset('data', args.data, train=True),
-            batch_size=num_samples, sampler=torch.utils.data.SubsetRandomSampler(
-                [i for i in
-                 range(int(rank * num_samples),
-                       int((rank + 1) * num_samples))]))  # Difference is in number of samples!!
-
-        # Load the testing data
-        num_test = 30064 // size
-        test_loader = torch.utils.data.DataLoader(
-            BinaryDataset('data', args.data, train=False),
-            batch_size=num_test, sampler=torch.utils.data.SubsetRandomSampler(
-                [i for i in range(int(rank * num_test), int((rank + 1) * num_test))]))
     ###########################
 
     ###########################
@@ -792,17 +826,21 @@ if __name__=='__main__':
 
     # Load communication matrix and initial weights
     mixing_matrix = torch.tensor(numpy.load(f'mixing_matrices/{args.comm_pattern}_{size}.dat', allow_pickle=True))
-    arch_size = 4 if args.data in ['a9a', 'miniboone'] else 8
-    init_weights = [numpy.load(os.path.join(os.getcwd(), f'init_weights/{args.data}/trial{args.trial}/rank{rank}/layer{l}.dat'),
+    arch_size = 4 if args.data == 'a9a' or args.data == 'covtype' else 8
+    if args.data != "covtype":
+        init_weights = [numpy.load(os.path.join(os.getcwd(), f'init_weights/{args.data}/trial{args.trial}/rank{rank}/layer{l}.dat'),
+                       allow_pickle=True) for l in range(arch_size)]
+    else:
+        init_weights = [numpy.load(os.path.join(os.getcwd(), f'init_weights/{args.data}/trial{args.trial}/rank{rank}/layer{l}.npy'),
                        allow_pickle=True) for l in range(arch_size)]
 
     # Print training information
     if rank == 0:
-        opening_statement = f' DEEPSTORM v2 on {args.data} '
+        opening_statement = f' DEEPSTORM v2 on {args.data}'
         print(f"\n{'#' * 75}")
         print('\n' + opening_statement.center(75, ' '))
-        print(
-            f'[GRAPH INFO] {size} agents | connectivity = {args.comm_pattern} | rho = {torch.sort(torch.eig(mixing_matrix)[0][:, 0])[0][size - 2].item()}')
+        print(f'[GRAPH INFO] {size} agents | connectivity = {args.comm_pattern} | \
+            rho = {torch.sort(torch.linalg.eig(mixing_matrix)[0].real)[0][size - 2].item()}')
         print(f'[TRAINING INFO] mini-batch = {args.mini_batch} | learning rate = {args.lr}\n')
         print(f"{'#' * 75}\n")
 
@@ -819,97 +857,28 @@ if __name__=='__main__':
     # Save the information
     method = 'deepstormv2'
 
-    # Make directory for both the dataset and the method and the model
+    # collect all results in a common folder
     try:
         os.mkdir(os.path.join(os.getcwd(), f'results/'))
     except:
-        # Main storage already exists already exists
         pass
     try:
-        os.mkdir(os.path.join(os.getcwd(), f'results/{args.data}'))
+        os.mkdir(os.path.join(os.getcwd(), f'results/plot_results'))
     except:
-        # Method already exists
         pass
     try:
-        os.mkdir(os.path.join(os.getcwd(), f'results/{args.data}/{method}'))
+        os.mkdir(os.path.join(os.getcwd(), f'results/plot_results/{args.data}'))
     except:
-        # Model already exists
         pass
-    try:
-        os.mkdir(os.path.join(os.getcwd(), f'results/{args.data}/{method}/trial{args.trial}'))
-    except:
-        # Trial already exists
-        pass
-    try:
-        os.mkdir(
-            os.path.join(os.getcwd(), f'results/{args.data}/{method}/trial{args.trial}/{args.comm_pattern}{size}'))
-    except:
-        # Graph and size already exists
-        pass
-    try:
-        os.mkdir(os.path.join(os.getcwd(),
-                              f'results/{args.data}/{method}/trial{args.trial}/{args.comm_pattern}{size}/{args.mini_batch}'))
-    except:
-        # Mini-batch already exists
-        pass
-
-    # Save path
-    path = os.path.join(os.getcwd(),
-                        f'results/{args.data}/{method}/trial{args.trial}/{args.comm_pattern}{size}/{args.mini_batch}')
+    path = os.path.join(os.getcwd(), f'results/plot_results/{args.data}')
 
     # Save information via numpy
     if rank == 0:
-        numpy.savetxt(
-            f'{path}/test_loss_lr{args.lr}_betanum{args.beta}_k0{args.k0}_step{args.step_type}_init{args.init_batch}_l1{args.l1}.txt',
-            solver.testing_loss, fmt='%.16f')
-        numpy.savetxt(
-            f'{path}/test_acc_lr{args.lr}_betanum{args.beta}_k0{args.k0}_step{args.step_type}_init{args.init_batch}_l1{args.l1}.txt',
-            solver.testing_accuracy, fmt='%.16f')
-        numpy.savetxt(
-            f'{path}/train_loss_lr{args.lr}_betanum{args.beta}_k0{args.k0}_step{args.step_type}_init{args.init_batch}_l1{args.l1}.txt',
-            solver.training_loss, fmt='%.16f')
-        numpy.savetxt(
-            f'{path}/train_acc_lr{args.lr}_betanum{args.beta}_k0{args.k0}_step{args.step_type}_init{args.init_batch}_l1{args.l1}.txt',
-            solver.training_accuracy, fmt='%.16f')
-        numpy.savetxt(
-            f'{path}/test_loss_local_lr{args.lr}_betanum{args.beta}_k0{args.k0}_step{args.step_type}_init{args.init_batch}_l1{args.l1}.txt',
-            solver.testing_loss_local, fmt='%.16f')
-        numpy.savetxt(
-            f'{path}/test_acc_local_lr{args.lr}_betanum{args.beta}_k0{args.k0}_step{args.step_type}_init{args.init_batch}_l1{args.l1}.txt',
-            solver.testing_accuracy_local, fmt='%.16f')
-        numpy.savetxt(
-            f'{path}/train_loss_local_lr{args.lr}_betanum{args.beta}_k0{args.k0}_step{args.step_type}_init{args.init_batch}_l1{args.l1}.txt',
-            solver.training_loss_local, fmt='%.16f')
-        numpy.savetxt(
-            f'{path}/train_acc_local_lr{args.lr}_betanum{args.beta}_k0{args.k0}_step{args.step_type}_init{args.init_batch}_l1{args.l1}.txt',
-            solver.training_accuracy_local, fmt='%.16f')
-        numpy.savetxt(
-            f'{path}/total_opt_lr{args.lr}_betanum{args.beta}_k0{args.k0}_step{args.step_type}_init{args.init_batch}_l1{args.l1}.txt',
-            solver.total_optimality, fmt='%.16f')
-        numpy.savetxt(
-            f'{path}/consensus_lr{args.lr}_betanum{args.beta}_k0{args.k0}_step{args.step_type}_init{args.init_batch}_l1{args.l1}.txt',
-            solver.consensus_violation, fmt='%.16f')
-        numpy.savetxt(
-            f'{path}/norm_hist_lr{args.lr}_betanum{args.beta}_k0{args.k0}_step{args.step_type}_init{args.init_batch}_l1{args.l1}.txt',
-            solver.norm_hist, fmt='%.16f')
-        numpy.savetxt(
-            f'{path}/iterate_hist_lr{args.lr}_betanum{args.beta}_k0{args.k0}_step{args.step_type}_init{args.init_batch}_l1{args.l1}.txt',
-            solver.iterate_norm_hist, fmt='%.16f')
-        numpy.savetxt(
-            f'{path}/total_time_lr{args.lr}_betanum{args.beta}_k0{args.k0}_step{args.step_type}_init{args.init_batch}_l1{args.l1}.txt',
-            solver.total_time, fmt='%.16f')
-        numpy.savetxt(
-            f'{path}/comm_time_lr{args.lr}_betanum{args.beta}_k0{args.k0}_step{args.step_type}_init{args.init_batch}_l1{args.l1}.txt',
-            solver.communication_time, fmt='%.16f')
-        numpy.savetxt(
-            f'{path}/comp_time_lr{args.lr}_betanum{args.beta}_k0{args.k0}_step{args.step_type}_init{args.init_batch}_l1{args.l1}.txt',
-            solver.compute_time, fmt='%.16f')
-        numpy.savetxt(
-            f'{path}/nnz_at_avg_lr{args.lr}_betanum{args.beta}_k0{args.k0}_step{args.step_type}_init{args.init_batch}_l1{args.l1}.txt',
-            solver.nnz_at_avg, fmt='%.16f')
-        numpy.savetxt(
-            f'{path}/avg_nnz_lr{args.lr}_betanum{args.beta}_k0{args.k0}_step{args.step_type}_init{args.init_batch}_l1{args.l1}.txt',
-            solver.avg_nnz, fmt='%.16f')
-
+        all_results = [solver.testing_loss, solver.testing_accuracy, solver.training_loss, solver.training_accuracy,\
+                    solver.testing_loss_local, solver.testing_accuracy_local, solver.training_loss_local, solver.training_accuracy_local,\
+                    solver.total_optimality, solver.consensus_violation, solver.norm_hist, solver.iterate_norm_hist, solver.total_time,\
+                    solver.communication_time, solver.compute_time, solver.nnz_at_avg, solver.avg_nnz]
+        all_results = numpy.array(all_results, dtype=object)
+        numpy.save(f'{path}/{method}_t_{args.trial}_{args.comm_pattern}_{args.mini_batch}_{args.updates}_lr_{args.lr}.npy', all_results)
     # Barrier at end so all agents stop this script before moving on
     comm.Barrier()
